@@ -327,19 +327,71 @@ curl -H "X-Scope-OrgID: anonymous" \
 
 ## Configurar Metabase
 
+### Primeiro Acesso
+
 1. Acesse http://localhost:3000
-2. Complete o setup inicial
-3. Adicione conexão com ClickHouse:
-   - Host: `clickhouse`
-   - Port: `8123`
-   - Database: `otel`
-   - User: `default`
-4. Adicione conexão com TimescaleDB:
-   - Host: `timescaledb`
-   - Port: `5432`
-   - Database: `metrics`
-   - User: `metrics`
-   - Password: `metrics`
+2. Complete o setup inicial criando uma conta de administrador
+3. Na tela de adicionar banco de dados, você pode pular e configurar depois
+
+### Driver ClickHouse
+
+O driver ClickHouse para Metabase é instalado automaticamente pelo container `metabase-clickhouse-driver` na inicialização. Não é necessária nenhuma configuração adicional.
+
+> **Nota**: O driver é baixado do repositório oficial [ClickHouse/metabase-clickhouse-driver](https://github.com/ClickHouse/metabase-clickhouse-driver) versão 1.50.0.
+
+### Adicionar Conexão ClickHouse
+
+1. Vá em **Settings** (engrenagem) > **Admin settings** > **Databases** > **Add database**
+2. Selecione **ClickHouse** no dropdown
+3. Configure:
+   - **Display name**: `ClickHouse OTEL`
+   - **Host**: `clickhouse`
+   - **Port**: `8123`
+   - **Database name**: `otel`
+   - **Username**: `default`
+   - **Password**: (deixe vazio)
+4. Clique em **Save**
+
+### Adicionar Conexão TimescaleDB
+
+1. Vá em **Settings** > **Admin settings** > **Databases** > **Add database**
+2. Selecione **PostgreSQL** no dropdown
+3. Configure:
+   - **Display name**: `TimescaleDB Metrics`
+   - **Host**: `timescaledb`
+   - **Port**: `5432`
+   - **Database name**: `metrics`
+   - **Username**: `metrics`
+   - **Password**: `metrics`
+4. Clique em **Save**
+
+### Queries de Exemplo no Metabase
+
+Após adicionar os bancos de dados, você pode criar queries nativas:
+
+**Total de métricas por tipo (ClickHouse):**
+```sql
+SELECT
+    MetricName,
+    count() as total,
+    max(TimeUnix) as last_seen
+FROM otel.otel_metrics_sum
+WHERE MetricName LIKE 'integration.%'
+GROUP BY MetricName
+ORDER BY total DESC
+```
+
+**Métricas por parceiro (ClickHouse):**
+```sql
+SELECT
+    Attributes['partner_id'] as partner_id,
+    MetricName,
+    sum(Value) as total
+FROM otel.otel_metrics_sum
+WHERE MetricName LIKE 'integration.auth.%'
+GROUP BY partner_id, MetricName
+ORDER BY partner_id, total DESC
+```
 
 ## Configurar Grafana
 
@@ -470,6 +522,21 @@ docker-compose logs minio
 
 # Testar conexão com Mimir (requer header X-Scope-OrgID)
 curl -H "X-Scope-OrgID: anonymous" http://localhost:9009/prometheus/api/v1/label/__name__/values
+```
+
+### Metabase não mostra ClickHouse como opção
+
+```bash
+# Verificar se o driver foi baixado
+docker exec poc-metabase ls -la /plugins/
+
+# Verificar logs de carregamento do driver
+docker-compose logs metabase | grep -i clickhouse
+
+# Se não houver driver, recriar o container
+docker-compose rm -f metabase metabase-clickhouse-driver
+docker volume rm poc-opentelemetry_metabase-plugins
+docker-compose up -d metabase
 ```
 
 ### Limpeza completa
