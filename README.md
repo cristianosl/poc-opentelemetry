@@ -1,6 +1,6 @@
 # POC OpenTelemetry Metrics
 
-POC para validar infraestrutura de coleta de métricas com OpenTelemetry, exportando para múltiplos backends com visualização via Metabase.
+POC para validar infraestrutura de coleta de métricas com OpenTelemetry, exportando para múltiplos backends (ClickHouse, Mimir e TimescaleDB) com visualização via Metabase e Grafana.
 
 ## Arquitetura
 
@@ -11,13 +11,22 @@ POC para validar infraestrutura de coleta de métricas com OpenTelemetry, export
 │   (OTLP)    │     │   (processors)    │
 └─────────────┘     │                   │     ┌─────────────┐
                     │                   │────▶│    Mimir    │
-                    └───────────────────┘     │ (Prometheus)│
-                                              └─────────────┘
-                                                     │
-┌─────────────┐                               ┌──────▼──────┐
-│  Metabase   │◀──────────────────────────────│   Grafana   │
-│ (Dashboard) │                               │ (Dashboard) │
-└─────────────┘                               └─────────────┘
+                    │                   │     │ (Prometheus)│
+                    │                   │     └─────────────┘
+                    │                   │
+                    │                   │     ┌──────────────────┐
+                    │                   │────▶│ TimescaleDB      │
+                    └───────────────────┘     │ Adapter (Python) │
+                                              └──────────┬───────┘
+                                                         │
+                                              ┌──────────▼───────┐
+                                              │   TimescaleDB    │
+                                              └──────────────────┘
+                                                         │
+┌─────────────┐                               ┌──────────┴───────┐
+│  Metabase   │◀──────────────────────────────│   Grafana        │
+│ (Dashboard) │                               │ (Dashboard)      │
+└─────────────┘                               └──────────────────┘
 ```
 
 ## Stack Tecnológica
@@ -31,6 +40,7 @@ POC para validar infraestrutura de coleta de métricas com OpenTelemetry, export
 | OTel Collector | 0.96.0 | Coleta e exportação |
 | ClickHouse | 24.1 | Banco colunar |
 | TimescaleDB | 2.14.0-pg16 | Séries temporais |
+| Python | 3.11 | Adapter TimescaleDB |
 | Mimir | 2.11.0 | Backend Prometheus |
 | Metabase | 0.48.11 | Visualização |
 | Grafana | 10.2.0 | Visualização |
@@ -48,6 +58,7 @@ POC para validar infraestrutura de coleta de métricas com OpenTelemetry, export
 | 8080 | Backend API |
 | 4317 | OTel Collector gRPC |
 | 4318 | OTel Collector HTTP |
+| 4319 | TimescaleDB Adapter gRPC |
 | 8123 | ClickHouse HTTP |
 | 9000 | ClickHouse Native |
 | 5432 | TimescaleDB |
@@ -81,7 +92,7 @@ docker-compose down -v
 
 ```bash
 # 1. Subir apenas a infraestrutura
-docker-compose up -d clickhouse timescaledb minio mimir otel-collector metabase grafana
+docker-compose up -d clickhouse timescaledb minio mimir otel-collector otel-timescale-adapter metabase grafana
 
 # 2. Executar o backend localmente
 cd backend
@@ -234,6 +245,23 @@ curl -X POST http://localhost:8080/api/v1/integrations/results/sync-002 \
 | Mimir | http://localhost:9009 | - |
 | OTel Collector zPages | http://localhost:55679/debug/tracez | - |
 
+## Como Funciona a Integração com TimescaleDB
+
+O OpenTelemetry Collector não possui um exportador nativo para PostgreSQL/TimescaleDB. Para resolver isso, foi criado um serviço intermediário (`otel-timescale-adapter`) que:
+
+1. **Recebe métricas via OTLP gRPC** na porta 4317
+2. **Transforma os dados** do formato OpenTelemetry para o schema do TimescaleDB
+3. **Escreve no TimescaleDB** usando inserções em batch para melhor performance
+
+O adapter suporta:
+- **Métricas de contador (sum)**: Armazenadas na tabela `otel_metrics_sum`
+- **Métricas de histograma**: Armazenadas na tabela `otel_metrics_histogram`
+
+O adapter é implementado em Python e utiliza:
+- `opentelemetry-proto` para deserializar dados OTLP
+- `grpcio` para o servidor gRPC
+- `psycopg2` para conexão com PostgreSQL/TimescaleDB
+
 ## Verificar Métricas
 
 ### ClickHouse
@@ -289,8 +317,38 @@ WHERE metric_name LIKE 'integration.%'
 ORDER BY time DESC
 LIMIT 20;
 
-# Agregação por minuto
+# Contar métricas por tipo
+SELECT
+    metric_name,
+    COUNT(*) as total,
+    MIN(time) as primeira,
+    MAX(time) as ultima
+FROM otel_metrics_sum
+GROUP BY metric_name
+ORDER BY total DESC
+LIMIT 10;
+
+# Ver histogramas
+SELECT
+    metric_name,
+    product,
+    partner_id,
+    count,
+    sum / NULLIF(count, 0) as avg_duration,
+    min,
+    max
+FROM otel_metrics_histogram
+WHERE metric_name LIKE 'integration.%.duration'
+ORDER BY time DESC
+LIMIT 10;
+
+# Agregação por minuto (view)
 SELECT * FROM product_metrics_summary
+ORDER BY bucket DESC
+LIMIT 20;
+
+# Agregação de histogramas (view)
+SELECT * FROM product_histograms_summary
 ORDER BY bucket DESC
 LIMIT 20;
 ```
@@ -524,6 +582,28 @@ docker-compose logs minio
 curl -H "X-Scope-OrgID: anonymous" http://localhost:9009/prometheus/api/v1/label/__name__/values
 ```
 
+### Métricas não aparecem no TimescaleDB
+
+```bash
+# Verificar logs do adapter
+docker-compose logs otel-timescale-adapter
+
+# Verificar se o adapter está rodando
+docker-compose ps otel-timescale-adapter
+
+# Verificar logs do collector (erros de exportação para TimescaleDB)
+docker-compose logs otel-collector | grep -i "timescale\|error.*otlp"
+
+# Verificar se há métricas no banco
+docker exec poc-timescaledb psql -U metrics -d metrics -c "SELECT COUNT(*) FROM otel_metrics_sum;"
+
+# Verificar conexão do adapter com TimescaleDB
+docker-compose logs otel-timescale-adapter | grep -i "conectado\|erro"
+
+# Reiniciar o adapter se necessário
+docker-compose restart otel-timescale-adapter
+```
+
 ### Metabase não mostra ClickHouse como opção
 
 ```bash
@@ -572,6 +652,10 @@ poc-opentelemetry/
 │   └── Dockerfile
 ├── otel-collector/
 │   └── config.yaml              # Configuração do Collector
+├── otel-timescale-adapter/
+│   ├── adapter.py              # Serviço Python que recebe OTLP e escreve no TimescaleDB
+│   ├── requirements.txt         # Dependências Python
+│   └── Dockerfile               # Imagem Docker do adapter
 ├── mimir/
 │   └── config.yaml              # Configuração do Mimir
 ├── databases/

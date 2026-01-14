@@ -44,8 +44,37 @@ services:
         condition: service_healthy
       mimir:
         condition: service_started
+      otel-timescale-adapter:
+        condition: service_started
     networks:
       - poc-network
+
+  # ==================== OpenTelemetry to TimescaleDB Adapter ====================
+  otel-timescale-adapter:
+    build:
+      context: ./otel-timescale-adapter
+      dockerfile: Dockerfile
+    container_name: poc-otel-timescale-adapter
+    ports:
+      - "4319:4317"   # OTLP gRPC (porta diferente para evitar conflito)
+    environment:
+      - OTLP_PORT=4317
+      - TIMESCALE_HOST=timescaledb
+      - TIMESCALE_PORT=5432
+      - TIMESCALE_DB=metrics
+      - TIMESCALE_USER=metrics
+      - TIMESCALE_PASSWORD=metrics
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - poc-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; from opentelemetry.proto.collector.metrics.v1 import metrics_service_pb2_grpc; import socket; s=socket.socket(); s.connect(('localhost', 4317)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ==================== ClickHouse ====================
   clickhouse:

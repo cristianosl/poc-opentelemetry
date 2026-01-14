@@ -1,5 +1,5 @@
 # OpenTelemetry Collector Configuration
-# Recebe métricas via OTLP e exporta para ClickHouse e Mimir
+# Recebe métricas via OTLP e exporta para ClickHouse, Mimir e TimescaleDB
 
 receivers:
   otlp:
@@ -55,6 +55,17 @@ exporters:
       max_interval: 30s
       max_elapsed_time: 300s
 
+  # Exporter para TimescaleDB (via adapter)
+  otlp/timescale:
+    endpoint: otel-timescale-adapter:4317
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
   # Debug exporter para logs (útil para troubleshooting)
   debug:
     verbosity: basic
@@ -78,7 +89,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch, resource]
-      exporters: [clickhouse, prometheusremotewrite, debug]
+      exporters: [clickhouse, prometheusremotewrite, otlp/timescale, debug]
 
   telemetry:
     logs:
