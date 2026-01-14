@@ -449,11 +449,11 @@ docker-compose restart backend
 # Verificar logs do collector
 docker-compose logs otel-collector
 
-# Verificar se ClickHouse está acessível
-docker exec poc-otel-collector wget -qO- http://clickhouse:8123/ping
-
 # Verificar se há métricas chegando
 docker exec poc-clickhouse clickhouse-client --query "SELECT count() FROM otel.otel_metrics_sum"
+
+# Ver últimas métricas
+docker exec poc-clickhouse clickhouse-client --query "SELECT MetricName, count() FROM otel.otel_metrics_sum GROUP BY MetricName"
 ```
 
 ### Mimir não recebe métricas
@@ -462,11 +462,14 @@ docker exec poc-clickhouse clickhouse-client --query "SELECT count() FROM otel.o
 # Verificar logs do Mimir
 docker-compose logs mimir
 
+# Verificar logs do collector (erros de exportação)
+docker-compose logs otel-collector | grep -i "error.*prometheus"
+
 # Verificar se MinIO está ok
 docker-compose logs minio
 
-# Verificar buckets
-docker exec poc-minio-init mc ls myminio/
+# Testar conexão com Mimir (requer header X-Scope-OrgID)
+curl -H "X-Scope-OrgID: anonymous" http://localhost:9009/prometheus/api/v1/label/__name__/values
 ```
 
 ### Limpeza completa
