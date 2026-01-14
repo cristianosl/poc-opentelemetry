@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: poc-metrics-backend
+
+server:
+  port: 8080
+
+# Configurações OpenTelemetry
+otel:
+  service:
+    name: ${OTEL_SERVICE_NAME:poc-metrics-backend}
+  resource:
+    attributes:
+      service.namespace: integration
+      deployment.environment: ${ENVIRONMENT:local}
+  exporter:
+    otlp:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+      protocol: grpc
+      timeout: 10000
+  metrics:
+    exporter: otlp
+    export:
+      interval: 60000
+
+# Spring Boot Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+    prometheus:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+
+# Logging
+logging:
+  level:
+    root: INFO
+    io.arcotech.poc: DEBUG
+    io.opentelemetry: INFO

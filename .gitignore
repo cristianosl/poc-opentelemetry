@@ -1,0 +1,21 @@
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Gradle
+.gradle/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Temporary files
+*.tmp
+*.swp

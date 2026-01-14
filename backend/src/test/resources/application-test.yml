@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: poc-metrics-backend-test
+
+otel:
+  service:
+    name: poc-metrics-backend-test
+  resource:
+    attributes:
+      deployment.environment: test
+  exporter:
+    otlp:
+      endpoint: http://localhost:4317
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+logging:
+  level:
+    root: WARN
+    io.arcotech.poc: DEBUG
