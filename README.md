@@ -264,123 +264,249 @@ O adapter é implementado em Python e utiliza:
 
 ## Verificar Métricas
 
-### ClickHouse
+Esta seção apresenta queries equivalentes nos três backends para facilitar a comparação de sintaxe.
+
+> **Nota sobre valores diferentes**: Os valores retornados podem diferir entre backends devido à forma de armazenamento:
+> - **ClickHouse/TimescaleDB**: Armazenam cada ponto de dados exportado (soma acumulada de todos os exports)
+> - **Mimir**: Armazena séries temporais Prometheus (valor atual do contador)
+
+### Conexão aos Bancos
 
 ```bash
-# Conectar ao ClickHouse
+# ClickHouse
 docker exec -it poc-clickhouse clickhouse-client
 
-# Listar métricas
-SELECT DISTINCT MetricName FROM otel.otel_metrics_sum WHERE MetricName LIKE 'integration.%';
-
-# Ver métricas de auth
-SELECT
-    MetricName,
-    Attributes['partner_id'] as partner_id,
-    Attributes['success'] as success,
-    Value,
-    TimeUnix
-FROM otel.otel_metrics_sum
-WHERE MetricName LIKE 'integration.auth.%'
-ORDER BY TimeUnix DESC
-LIMIT 20;
-
-# Ver histogramas de duração
-SELECT
-    MetricName,
-    Attributes['partner_id'] as partner_id,
-    Count,
-    Sum / Count as avg_duration,
-    Min,
-    Max
-FROM otel.otel_metrics_histogram
-WHERE MetricName LIKE 'integration.%.duration'
-ORDER BY TimeUnix DESC
-LIMIT 10;
-```
-
-### TimescaleDB
-
-```bash
-# Conectar ao TimescaleDB
+# TimescaleDB
 docker exec -it poc-timescaledb psql -U metrics -d metrics
 
-# Ver métricas recentes
-SELECT
-    time,
-    metric_name,
-    product,
-    partner_id,
-    value
-FROM otel_metrics_sum
-WHERE metric_name LIKE 'integration.%'
-ORDER BY time DESC
-LIMIT 20;
-
-# Contar métricas por tipo
-SELECT
-    metric_name,
-    COUNT(*) as total,
-    MIN(time) as primeira,
-    MAX(time) as ultima
-FROM otel_metrics_sum
-GROUP BY metric_name
-ORDER BY total DESC
-LIMIT 10;
-
-# Ver histogramas
-SELECT
-    metric_name,
-    product,
-    partner_id,
-    count,
-    sum / NULLIF(count, 0) as avg_duration,
-    min,
-    max
-FROM otel_metrics_histogram
-WHERE metric_name LIKE 'integration.%.duration'
-ORDER BY time DESC
-LIMIT 10;
-
-# Agregação por minuto (view)
-SELECT * FROM product_metrics_summary
-ORDER BY bucket DESC
-LIMIT 20;
-
-# Agregação de histogramas (view)
-SELECT * FROM product_histograms_summary
-ORDER BY bucket DESC
-LIMIT 20;
+# Mimir (via curl com header obrigatório)
+curl -s -H 'X-Scope-OrgID: anonymous' 'http://localhost:9009/prometheus/api/v1/query?query=...'
 ```
 
-### Mimir (PromQL)
+---
 
-> **Importante**: O Mimir está configurado em modo multi-tenant. Todas as queries precisam do header `X-Scope-OrgID: anonymous`.
+### Query 1: Listar métricas disponíveis
 
+**ClickHouse:**
+```sql
+SELECT DISTINCT MetricName
+FROM otel.otel_metrics_sum
+WHERE MetricName LIKE 'integration.%'
+ORDER BY MetricName;
+```
+
+**TimescaleDB:**
+```sql
+SELECT DISTINCT metric_name
+FROM otel_metrics_sum
+WHERE metric_name LIKE 'integration.%'
+ORDER BY metric_name;
+```
+
+**Mimir (PromQL):**
 ```bash
-# Query simples
-curl -s -H 'X-Scope-OrgID: anonymous' \
-  'http://localhost:9009/prometheus/api/v1/query?query=integration_auth_redirect_started_total'
-
-# Query com filtro
-curl -s -H 'X-Scope-OrgID: anonymous' \
-  'http://localhost:9009/prometheus/api/v1/query?query=integration_auth_redirect_started_total{partner_id="partner-123"}'
-
-# Rate de métricas nos últimos 5 minutos
-curl -s -H 'X-Scope-OrgID: anonymous' \
-  -G 'http://localhost:9009/prometheus/api/v1/query' \
-  --data-urlencode 'query=rate(integration_auth_redirect_started_total[5m])'
-
-# Histograma de duração (percentil 95)
-curl -s -H 'X-Scope-OrgID: anonymous' \
-  -G 'http://localhost:9009/prometheus/api/v1/query' \
-  --data-urlencode 'query=histogram_quantile(0.95, rate(integration_auth_redirect_duration_milliseconds_bucket[5m]))'
-
-# Listar todas as métricas de integração disponíveis
 curl -s -H 'X-Scope-OrgID: anonymous' \
   'http://localhost:9009/prometheus/api/v1/label/__name__/values' | \
   grep -o '"integration[^"]*"'
 ```
+
+---
+
+### Query 2: Total de redirects por partner
+
+**ClickHouse:**
+```sql
+SELECT
+    Attributes['partner_id'] AS partner_id,
+    sum(Value) AS total
+FROM otel.otel_metrics_sum
+WHERE MetricName = 'integration.auth.redirect.started'
+GROUP BY partner_id
+ORDER BY total DESC;
+```
+
+**TimescaleDB:**
+```sql
+SELECT
+    partner_id,
+    sum(value) AS total
+FROM otel_metrics_sum
+WHERE metric_name = 'integration.auth.redirect.started'
+GROUP BY partner_id
+ORDER BY total DESC;
+```
+
+**Mimir (PromQL):**
+```bash
+# Valor atual por partner
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/query?query=integration_auth_redirect_started_total'
+
+# Total agregado (soma de todos partners)
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/query?query=sum(integration_auth_redirect_started_total)'
+```
+
+---
+
+### Query 3: Contagem de webhooks por status (success vs error)
+
+**ClickHouse:**
+```sql
+SELECT
+    MetricName,
+    sum(Value) AS total
+FROM otel.otel_metrics_sum
+WHERE MetricName IN (
+    'integration.sender.webhook.success',
+    'integration.sender.webhook.error'
+)
+GROUP BY MetricName;
+```
+
+**TimescaleDB:**
+```sql
+SELECT
+    metric_name,
+    sum(value) AS total
+FROM otel_metrics_sum
+WHERE metric_name IN (
+    'integration.sender.webhook.success',
+    'integration.sender.webhook.error'
+)
+GROUP BY metric_name;
+```
+
+**Mimir (PromQL):**
+```bash
+# Success
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/query?query=sum(integration_sender_webhook_success_total)'
+
+# Error
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/query?query=sum(integration_sender_webhook_error_total)'
+
+# Ambos em uma query (por métrica)
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query={__name__=~"integration_sender_webhook_(success|error)_total"}'
+```
+
+---
+
+### Query 4: Estatísticas de duração do redirect (histograma)
+
+**ClickHouse:**
+```sql
+SELECT
+    Attributes['partner_id'] AS partner_id,
+    sum(Count) AS total_requests,
+    sum(Sum) / sum(Count) AS avg_ms,
+    min(Min) AS min_ms,
+    max(Max) AS max_ms
+FROM otel.otel_metrics_histogram
+WHERE MetricName = 'integration.auth.redirect.duration'
+GROUP BY partner_id
+ORDER BY total_requests DESC;
+```
+
+**TimescaleDB:**
+```sql
+SELECT
+    partner_id,
+    sum(count) AS total_requests,
+    sum(sum) / NULLIF(sum(count), 0) AS avg_ms,
+    min(min) AS min_ms,
+    max(max) AS max_ms
+FROM otel_metrics_histogram
+WHERE metric_name = 'integration.auth.redirect.duration'
+GROUP BY partner_id
+ORDER BY total_requests DESC;
+```
+
+**Mimir (PromQL):**
+```bash
+# Média de duração
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query=sum(integration_auth_redirect_duration_milliseconds_sum) / sum(integration_auth_redirect_duration_milliseconds_count)'
+
+# Percentil 50 (mediana)
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query=histogram_quantile(0.50, rate(integration_auth_redirect_duration_milliseconds_bucket[5m]))'
+
+# Percentil 95
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query=histogram_quantile(0.95, rate(integration_auth_redirect_duration_milliseconds_bucket[5m]))'
+
+# Percentil 99
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query=histogram_quantile(0.99, rate(integration_auth_redirect_duration_milliseconds_bucket[5m]))'
+```
+
+---
+
+### Query 5: Métricas por produto (auth, receiver, sender)
+
+**ClickHouse:**
+```sql
+SELECT
+    Attributes['product'] AS product,
+    MetricName,
+    sum(Value) AS total
+FROM otel.otel_metrics_sum
+WHERE MetricName LIKE 'integration.%'
+GROUP BY product, MetricName
+ORDER BY product, total DESC;
+```
+
+**TimescaleDB:**
+```sql
+SELECT
+    product,
+    metric_name,
+    sum(value) AS total
+FROM otel_metrics_sum
+WHERE metric_name LIKE 'integration.%'
+GROUP BY product, metric_name
+ORDER BY product, total DESC;
+```
+
+**Mimir (PromQL):**
+```bash
+# Todas métricas de auth
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query={__name__=~"integration_auth_.+", product="auth"}'
+
+# Todas métricas de receiver
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query={__name__=~"integration_receiver_.+", product="receiver"}'
+
+# Todas métricas de sender
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query={__name__=~"integration_sender_.+", product="sender"}'
+```
+
+---
+
+### Comparativo de Sintaxe
+
+| Operação | ClickHouse | TimescaleDB | Mimir (PromQL) |
+|----------|------------|-------------|----------------|
+| Acessar atributo | `Attributes['key']` | `column_name` | `{label="value"}` |
+| Filtro de nome | `WHERE MetricName = '...'` | `WHERE metric_name = '...'` | `metric_name{...}` |
+| Agregação | `sum(Value)` | `sum(value)` | `sum(metric)` |
+| Group by | `GROUP BY field` | `GROUP BY field` | `sum by (label)` |
+| Wildcard | `LIKE 'prefix.%'` | `LIKE 'prefix.%'` | `{__name__=~"prefix.+"}` |
+| Histograma avg | `Sum / Count` | `sum / count` | `_sum / _count` |
+| Percentil | N/A (calcular buckets) | N/A (calcular buckets) | `histogram_quantile(0.95, ...)` |
 
 ## Configurar Metabase
 
