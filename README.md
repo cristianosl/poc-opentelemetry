@@ -84,8 +84,8 @@ docker-compose logs -f backend
 # Parar a stack
 docker-compose down
 
-# Parar e remover volumes
-docker-compose down -v
+# Parar e limpar dados (ver seção Troubleshooting > Limpar bancos de dados)
+docker-compose down && rm -rf ./data/*
 ```
 
 ### Desenvolvimento Local
@@ -266,9 +266,10 @@ O adapter é implementado em Python e utiliza:
 
 Esta seção apresenta queries equivalentes nos três backends para facilitar a comparação de sintaxe.
 
-> **Nota sobre valores diferentes**: Os valores retornados podem diferir entre backends devido à forma de armazenamento:
-> - **ClickHouse/TimescaleDB**: Armazenam cada ponto de dados exportado (soma acumulada de todos os exports)
-> - **Mimir**: Armazena séries temporais Prometheus (valor atual do contador)
+> **Nota sobre temporalidade CUMULATIVE**: As métricas são exportadas com temporalidade cumulativa, ou seja, cada export envia o valor total acumulado. Para obter o valor correto:
+> - **ClickHouse**: Use `argMax(Value, TimeUnix)` para pegar o último valor
+> - **TimescaleDB**: Use `DISTINCT ON` ou subquery com `max(time)` para pegar o último valor
+> - **Mimir**: Interpreta automaticamente como contador Prometheus (valor atual)
 
 ### Conexão aos Bancos
 
@@ -318,7 +319,7 @@ curl -s -H 'X-Scope-OrgID: anonymous' \
 ```sql
 SELECT
     Attributes['partner_id'] AS partner_id,
-    sum(Value) AS total
+    argMax(Value, TimeUnix) AS total
 FROM otel.otel_metrics_sum
 WHERE MetricName = 'integration.auth.redirect.started'
 GROUP BY partner_id
@@ -329,10 +330,12 @@ ORDER BY total DESC;
 ```sql
 SELECT
     partner_id,
-    sum(value) AS total
-FROM otel_metrics_sum
+    value AS total
+FROM otel_metrics_sum s1
 WHERE metric_name = 'integration.auth.redirect.started'
-GROUP BY partner_id
+  AND time = (SELECT max(time) FROM otel_metrics_sum s2
+              WHERE s2.metric_name = s1.metric_name
+              AND s2.partner_id = s1.partner_id)
 ORDER BY total DESC;
 ```
 
@@ -353,27 +356,38 @@ curl -s -H 'X-Scope-OrgID: anonymous' \
 
 **ClickHouse:**
 ```sql
-SELECT
-    MetricName,
-    sum(Value) AS total
-FROM otel.otel_metrics_sum
-WHERE MetricName IN (
-    'integration.sender.webhook.success',
-    'integration.sender.webhook.error'
+WITH latest AS (
+    SELECT
+        MetricName,
+        Attributes['partner_id'] AS partner_id,
+        argMax(Value, TimeUnix) AS last_value
+    FROM otel.otel_metrics_sum
+    WHERE MetricName IN (
+        'integration.sender.webhook.success',
+        'integration.sender.webhook.error'
+    )
+    GROUP BY MetricName, partner_id
 )
-GROUP BY MetricName;
+SELECT MetricName, sum(last_value) AS total
+FROM latest
+GROUP BY MetricName
+ORDER BY MetricName;
 ```
 
 **TimescaleDB:**
 ```sql
-SELECT
-    metric_name,
-    sum(value) AS total
-FROM otel_metrics_sum
-WHERE metric_name IN (
-    'integration.sender.webhook.success',
-    'integration.sender.webhook.error'
+WITH latest AS (
+    SELECT DISTINCT ON (metric_name, partner_id)
+        metric_name, partner_id, value
+    FROM otel_metrics_sum
+    WHERE metric_name IN (
+        'integration.sender.webhook.success',
+        'integration.sender.webhook.error'
+    )
+    ORDER BY metric_name, partner_id, time DESC
 )
+SELECT metric_name, sum(value) AS total
+FROM latest
 GROUP BY metric_name;
 ```
 
@@ -401,10 +415,10 @@ curl -s -H 'X-Scope-OrgID: anonymous' \
 ```sql
 SELECT
     Attributes['partner_id'] AS partner_id,
-    sum(Count) AS total_requests,
-    sum(Sum) / sum(Count) AS avg_ms,
-    min(Min) AS min_ms,
-    max(Max) AS max_ms
+    argMax(Count, TimeUnix) AS total_requests,
+    argMax(Sum, TimeUnix) / argMax(Count, TimeUnix) AS avg_ms,
+    argMax(Min, TimeUnix) AS min_ms,
+    argMax(Max, TimeUnix) AS max_ms
 FROM otel.otel_metrics_histogram
 WHERE MetricName = 'integration.auth.redirect.duration'
 GROUP BY partner_id
@@ -413,16 +427,15 @@ ORDER BY total_requests DESC;
 
 **TimescaleDB:**
 ```sql
-SELECT
+SELECT DISTINCT ON (partner_id)
     partner_id,
-    sum(count) AS total_requests,
-    sum(sum) / NULLIF(sum(count), 0) AS avg_ms,
-    min(min) AS min_ms,
-    max(max) AS max_ms
+    count AS total_requests,
+    sum / NULLIF(count, 0) AS avg_ms,
+    min AS min_ms,
+    max AS max_ms
 FROM otel_metrics_histogram
 WHERE metric_name = 'integration.auth.redirect.duration'
-GROUP BY partner_id
-ORDER BY total_requests DESC;
+ORDER BY partner_id, time DESC;
 ```
 
 **Mimir (PromQL):**
@@ -457,21 +470,32 @@ curl -s -H 'X-Scope-OrgID: anonymous' \
 SELECT
     Attributes['product'] AS product,
     MetricName,
-    sum(Value) AS total
-FROM otel.otel_metrics_sum
-WHERE MetricName LIKE 'integration.%'
+    sum(last_value) AS total
+FROM (
+    SELECT
+        Attributes['product'] AS product,
+        Attributes['partner_id'] AS partner_id,
+        MetricName,
+        argMax(Value, TimeUnix) AS last_value
+    FROM otel.otel_metrics_sum
+    WHERE MetricName LIKE 'integration.%'
+    GROUP BY product, partner_id, MetricName
+)
 GROUP BY product, MetricName
 ORDER BY product, total DESC;
 ```
 
 **TimescaleDB:**
 ```sql
-SELECT
-    product,
-    metric_name,
-    sum(value) AS total
-FROM otel_metrics_sum
-WHERE metric_name LIKE 'integration.%'
+WITH latest AS (
+    SELECT DISTINCT ON (product, partner_id, metric_name)
+        product, metric_name, value
+    FROM otel_metrics_sum
+    WHERE metric_name LIKE 'integration.%'
+    ORDER BY product, partner_id, metric_name, time DESC
+)
+SELECT product, metric_name, sum(value) AS total
+FROM latest
 GROUP BY product, metric_name
 ORDER BY product, total DESC;
 ```
@@ -502,10 +526,10 @@ curl -s -H 'X-Scope-OrgID: anonymous' \
 |----------|------------|-------------|----------------|
 | Acessar atributo | `Attributes['key']` | `column_name` | `{label="value"}` |
 | Filtro de nome | `WHERE MetricName = '...'` | `WHERE metric_name = '...'` | `metric_name{...}` |
-| Agregação | `sum(Value)` | `sum(value)` | `sum(metric)` |
+| Último valor | `argMax(Value, TimeUnix)` | `DISTINCT ON ... ORDER BY time DESC` | (automático) |
 | Group by | `GROUP BY field` | `GROUP BY field` | `sum by (label)` |
 | Wildcard | `LIKE 'prefix.%'` | `LIKE 'prefix.%'` | `{__name__=~"prefix.+"}` |
-| Histograma avg | `Sum / Count` | `sum / count` | `_sum / _count` |
+| Histograma avg | `argMax(Sum, TimeUnix) / argMax(Count, TimeUnix)` | `sum / count` (último) | `_sum / _count` |
 | Percentil | N/A (calcular buckets) | N/A (calcular buckets) | `histogram_quantile(0.95, ...)` |
 
 ## Configurar Metabase
@@ -520,7 +544,7 @@ curl -s -H 'X-Scope-OrgID: anonymous' \
 
 O driver ClickHouse para Metabase é instalado automaticamente pelo container `metabase-clickhouse-driver` na inicialização. Não é necessária nenhuma configuração adicional.
 
-> **Nota**: O driver é baixado do repositório oficial [ClickHouse/metabase-clickhouse-driver](https://github.com/ClickHouse/metabase-clickhouse-driver) versão 1.50.0.
+> **Nota**: O driver é baixado do repositório oficial [ClickHouse/metabase-clickhouse-driver](https://github.com/ClickHouse/metabase-clickhouse-driver) versão 1.3.1.
 
 ### Adicionar Conexão ClickHouse
 
@@ -556,12 +580,12 @@ Após adicionar os bancos de dados, você pode criar queries nativas:
 ```sql
 SELECT
     MetricName,
-    count() as total,
-    max(TimeUnix) as last_seen
+    count() as registros,
+    max(toDateTime(TimeUnix)) as last_seen
 FROM otel.otel_metrics_sum
 WHERE MetricName LIKE 'integration.%'
 GROUP BY MetricName
-ORDER BY total DESC
+ORDER BY registros DESC
 ```
 
 **Métricas por parceiro (ClickHouse):**
@@ -569,11 +593,11 @@ ORDER BY total DESC
 SELECT
     Attributes['partner_id'] as partner_id,
     MetricName,
-    sum(Value) as total
+    argMax(Value, TimeUnix) as valor_atual
 FROM otel.otel_metrics_sum
 WHERE MetricName LIKE 'integration.auth.%'
 GROUP BY partner_id, MetricName
-ORDER BY partner_id, total DESC
+ORDER BY partner_id, MetricName
 ```
 
 ## Configurar Grafana
@@ -750,15 +774,42 @@ docker-compose logs metabase | grep -i clickhouse
 
 # Se não houver driver, recriar o container
 docker-compose rm -f metabase metabase-clickhouse-driver
-docker volume rm poc-opentelemetry_metabase-plugins
+rm -rf ./data/metabase/plugins/*
 docker-compose up -d metabase
+```
+
+### Limpar bancos de dados
+
+Os dados são armazenados localmente na pasta `./data/`. Para limpar os bancos:
+
+```bash
+# Parar os serviços
+docker-compose down
+
+# Limpar apenas ClickHouse
+rm -rf ./data/clickhouse/*
+
+# Limpar apenas TimescaleDB
+rm -rf ./data/timescaledb/*
+
+# Limpar apenas Mimir (métricas)
+rm -rf ./data/mimir/*
+
+# Limpar TODOS os bancos (ClickHouse, TimescaleDB, Mimir, MinIO)
+rm -rf ./data/clickhouse/* ./data/timescaledb/* ./data/mimir/* ./data/minio/*
+
+# Subir novamente (schemas serão recriados automaticamente)
+docker-compose up -d
 ```
 
 ### Limpeza completa
 
 ```bash
-# Parar tudo e remover volumes
-docker-compose down -v
+# Parar tudo
+docker-compose down
+
+# Remover todos os dados locais
+rm -rf ./data/*
 
 # Remover imagens
 docker-compose down --rmi local
@@ -802,6 +853,13 @@ poc-opentelemetry/
 │   │   └── init.sql             # Schema ClickHouse
 │   └── timescaledb/
 │       └── init.sql             # Schema TimescaleDB
+├── data/                        # Dados locais (não commitado - .gitignore)
+│   ├── clickhouse/              # Dados do ClickHouse
+│   ├── timescaledb/             # Dados do TimescaleDB
+│   ├── mimir/                   # Dados do Mimir
+│   ├── minio/                   # Dados do MinIO (storage do Mimir)
+│   ├── grafana/                 # Dados do Grafana
+│   └── metabase/                # Dados e plugins do Metabase
 ├── docker-compose.yml
 └── README.md
 ```

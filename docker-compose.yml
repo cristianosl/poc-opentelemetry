@@ -88,8 +88,7 @@ services:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     volumes:
-      - clickhouse-data:/var/lib/clickhouse
-      - clickhouse-logs:/var/log/clickhouse-server
+      - ./data/clickhouse:/var/lib/clickhouse
       - ./databases/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - poc-network
@@ -115,7 +114,7 @@ services:
       - POSTGRES_PASSWORD=metrics
       - POSTGRES_DB=metrics
     volumes:
-      - timescale-data:/var/lib/postgresql/data
+      - ./data/timescaledb:/var/lib/postgresql/data
       - ./databases/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - poc-network
@@ -138,7 +137,7 @@ services:
       - MINIO_ROOT_PASSWORD=supersecret
     command: server /data --console-address ":9001"
     volumes:
-      - minio-data:/data
+      - ./data/minio:/data
     networks:
       - poc-network
     healthcheck:
@@ -176,7 +175,7 @@ services:
     command: ["-config.file=/etc/mimir/config.yaml"]
     volumes:
       - ./mimir/config.yaml:/etc/mimir/config.yaml:ro
-      - mimir-data:/data
+      - ./data/mimir:/data
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -194,7 +193,7 @@ services:
     image: alpine:3.19
     container_name: poc-metabase-driver-init
     volumes:
-      - metabase-plugins:/plugins
+      - ./data/metabase/plugins:/plugins
     command: >
       sh -c "
         apk add --no-cache curl;
@@ -220,8 +219,8 @@ services:
       - JAVA_TIMEZONE=America/Sao_Paulo
       - MB_PLUGINS_DIR=/plugins
     volumes:
-      - metabase-data:/metabase-data
-      - metabase-plugins:/plugins
+      - ./data/metabase:/metabase-data
+      - ./data/metabase/plugins:/plugins
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -250,7 +249,7 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
-      - grafana-data:/var/lib/grafana
+      - ./data/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       mimir:
@@ -268,12 +267,3 @@ networks:
   poc-network:
     driver: bridge
 
-volumes:
-  clickhouse-data:
-  clickhouse-logs:
-  timescale-data:
-  minio-data:
-  mimir-data:
-  metabase-data:
-  metabase-plugins:
-  grafana-data:
