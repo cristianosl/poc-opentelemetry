@@ -359,28 +359,27 @@ LIMIT 20;
 
 ```bash
 # Query simples
-curl -H "X-Scope-OrgID: anonymous" \
-  -G http://localhost:9009/prometheus/api/v1/query \
-  --data-urlencode 'query=integration_auth_redirect_started_total'
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/query?query=integration_auth_redirect_started_total'
 
 # Query com filtro
-curl -H "X-Scope-OrgID: anonymous" \
-  -G http://localhost:9009/prometheus/api/v1/query \
-  --data-urlencode 'query=integration_auth_redirect_started_total{partner_id="partner-123"}'
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/query?query=integration_auth_redirect_started_total{partner_id="partner-123"}'
 
 # Rate de métricas nos últimos 5 minutos
-curl -H "X-Scope-OrgID: anonymous" \
-  -G http://localhost:9009/prometheus/api/v1/query \
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
   --data-urlencode 'query=rate(integration_auth_redirect_started_total[5m])'
 
 # Histograma de duração (percentil 95)
-curl -H "X-Scope-OrgID: anonymous" \
-  -G http://localhost:9009/prometheus/api/v1/query \
-  --data-urlencode 'query=histogram_quantile(0.95, integration_auth_redirect_duration_milliseconds_bucket)'
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  -G 'http://localhost:9009/prometheus/api/v1/query' \
+  --data-urlencode 'query=histogram_quantile(0.95, rate(integration_auth_redirect_duration_milliseconds_bucket[5m]))'
 
-# Listar todas as métricas disponíveis
-curl -H "X-Scope-OrgID: anonymous" \
-  http://localhost:9009/prometheus/api/v1/label/__name__/values | jq '.data[] | select(startswith("integration"))'
+# Listar todas as métricas de integração disponíveis
+curl -s -H 'X-Scope-OrgID: anonymous' \
+  'http://localhost:9009/prometheus/api/v1/label/__name__/values' | \
+  grep -o '"integration[^"]*"'
 ```
 
 ## Configurar Metabase
@@ -453,14 +452,24 @@ ORDER BY partner_id, total DESC
 
 ## Configurar Grafana
 
+O Grafana já vem **pré-configurado** com o datasource do Mimir. Basta acessar:
+
 1. Acesse http://localhost:3001 (admin/admin)
-2. Adicione Data Source Prometheus:
-   - URL: `http://mimir:9009/prometheus`
-   - Em "Custom HTTP Headers", adicione:
-     - Header: `X-Scope-OrgID`
-     - Value: `anonymous`
-3. Clique em "Save & Test" para verificar a conexão
-4. Importe dashboards ou crie queries PromQL
+2. O datasource "Mimir" já está configurado e pronto para uso
+3. Crie dashboards ou use o Explore para queries PromQL
+
+### Exemplo de Query no Explore
+
+```promql
+# Total de redirects por partner
+integration_auth_redirect_started_total
+
+# Taxa de erros nos últimos 5 minutos
+rate(integration_auth_redirect_failed_total[5m])
+
+# Percentil 95 de duração
+histogram_quantile(0.95, rate(integration_auth_redirect_duration_milliseconds_bucket[5m]))
+```
 
 ## Executar Testes
 
@@ -579,7 +588,7 @@ docker-compose logs otel-collector | grep -i "error.*prometheus"
 docker-compose logs minio
 
 # Testar conexão com Mimir (requer header X-Scope-OrgID)
-curl -H "X-Scope-OrgID: anonymous" http://localhost:9009/prometheus/api/v1/label/__name__/values
+curl -s -H 'X-Scope-OrgID: anonymous' 'http://localhost:9009/prometheus/api/v1/label/__name__/values'
 ```
 
 ### Métricas não aparecem no TimescaleDB
@@ -653,9 +662,13 @@ poc-opentelemetry/
 ├── otel-collector/
 │   └── config.yaml              # Configuração do Collector
 ├── otel-timescale-adapter/
-│   ├── adapter.py              # Serviço Python que recebe OTLP e escreve no TimescaleDB
+│   ├── adapter.py               # Serviço Python que recebe OTLP e escreve no TimescaleDB
 │   ├── requirements.txt         # Dependências Python
 │   └── Dockerfile               # Imagem Docker do adapter
+├── grafana/
+│   └── provisioning/
+│       └── datasources/
+│           └── mimir.yaml       # Datasource Mimir pré-configurado
 ├── mimir/
 │   └── config.yaml              # Configuração do Mimir
 ├── databases/
